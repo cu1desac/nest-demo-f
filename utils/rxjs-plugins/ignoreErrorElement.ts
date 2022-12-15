@@ -1,0 +1,1 @@
+export const ignoreErrorElement = (...args: any) => {}
