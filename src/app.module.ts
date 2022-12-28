@@ -7,9 +7,16 @@ import { DbModule } from '@app/db';
 import { SpectateClientModule } from './spectate-client/spectate-client.module';
 import { RiotApiModule } from '../utils/riot-api/riot-api.module';
 import { HttpModule } from '@nestjs/axios';
+import { ObserverModule } from './observer/observer.module';
 
 @Module({
-  imports: [DbModule, SpectateClientModule, RiotApiModule, HttpModule],
+  imports: [
+    DbModule,
+    SpectateClientModule,
+    RiotApiModule,
+    HttpModule,
+    ObserverModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

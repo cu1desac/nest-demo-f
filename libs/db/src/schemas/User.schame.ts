@@ -2,7 +2,23 @@ import { Prop } from '@typegoose/typegoose';
 
 export class User {
   @Prop()
-  username: string;
+  ip: string;
   @Prop()
-  password: string;
+  gameId: number;
+  @Prop()
+  platformId: string;
+  @Prop()
+  filepath: string;
+  @Prop()
+  startChunkId: number;
+  @Prop()
+  startFrameId: number;
+  @Prop()
+  endChunkId: number;
+  @Prop()
+  endFrameId: number;
+  @Prop()
+  nextChunkId: number;
+  @Prop()
+  nextFrameId: number;
 }

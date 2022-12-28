@@ -1,8 +1,8 @@
-import { Global, Module, Provider, Inject } from '@nestjs/common';
-import { DbService } from './db.service';
+import { Global, Module, Provider } from '@nestjs/common';
 import { getModelForClass, mongoose } from '@typegoose/typegoose';
 import { User } from './schemas/User.schame';
 import { Game } from '@app/db/schemas/Game.schame';
+import { Summoner } from '@app/db/schemas/Summoner.schame';
 
 const providers: Provider[] = [
   {
@@ -16,6 +16,10 @@ const providers: Provider[] = [
   {
     provide: Game.name,
     useFactory: () => getModelForClass(Game),
+  },
+  {
+    provide: Summoner.name,
+    useFactory: () => getModelForClass(Summoner),
   },
 ];
 

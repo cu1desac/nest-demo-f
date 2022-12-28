@@ -1,43 +1,25 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { CreateSpectateClientDto } from './dto/create-spectate-client.dto';
-import { UpdateSpectateClientDto } from './dto/update-spectate-client.dto';
-import { User } from '@app/db//schemas/User.schame';
-import {
-  ArraySubDocumentType,
-  DocumentType,
-  ReturnModelType,
-  SubDocumentType,
-} from '@typegoose/typegoose';
+import { DocumentType, ReturnModelType } from '@typegoose/typegoose';
 import { SpectatorTvService } from '../../utils/spectator-tv/spectator-tv.service';
 import { RiotApiService } from '../../utils/riot-api/riot-api.service';
 import {
   catchError,
-  concatAll,
   concatMap,
   defaultIfEmpty,
   delay,
   distinct,
+  exhaustMap,
   filter,
   forkJoin,
   from,
-  fromEvent,
-  interval,
   isEmpty,
-  lastValueFrom,
   map,
-  mapTo,
-  merge,
-  mergeAll,
   mergeMap,
   Observable,
   of,
-  race,
   retry,
-  take,
   tap,
   timer,
-  toArray,
-  using,
 } from 'rxjs';
 import { Game } from '@app/db/schemas/Game.schame';
 import * as fs from 'fs';
@@ -50,14 +32,15 @@ import { PlatformIdAndSummonerName } from './interfaces/PlatformIdAndSummonerNam
 import { HttpService } from '@nestjs/axios';
 import { LastChunkInfo } from './interfaces/LastChunkInfo.interface';
 import * as stream from 'stream';
-import { raw } from 'express';
 import { GameDb } from './interfaces/GameDb.interface';
+import { Summoner } from '@app/db/schemas/Summoner.schame';
 
 @Injectable()
 export class SpectateClientService {
   constructor(
-    @Inject(User.name) private readonly UserModel: ReturnModelType<typeof User>,
     @Inject(Game.name) private readonly GameModel: ReturnModelType<typeof Game>,
+    @Inject(Summoner.name)
+    private readonly SummonerModel: ReturnModelType<typeof Summoner>,
     private readonly SpectatorTvService: SpectatorTvService,
     private readonly RiotApiService: RiotApiService,
     private readonly httpService: HttpService,
@@ -77,7 +60,7 @@ export class SpectateClientService {
     return platformIdAndGameIdAndSummonerName;
   }
   //是否为指定模式、开局时长 游戏
-  static isTargetGame(activeGameInfo: ActiveGameInfo): boolean {
+  private static isTargetGame(activeGameInfo: ActiveGameInfo): boolean {
     const { mapId, gameMode, gameType, gameQueueConfigId, gameLength } =
       activeGameInfo;
     //非指定游戏地图
@@ -91,7 +74,7 @@ export class SpectateClientService {
     return true;
   }
   //组装插入数据库的格式
-  static formGameDto(activeGameInfo: ActiveGameInfo): GameDb {
+  private static formGameDto(activeGameInfo: ActiveGameInfo): GameDb {
     const {
       gameId,
       platformId,
@@ -123,6 +106,72 @@ export class SpectateClientService {
       ],
     };
   }
+  //从数据库取出summoners
+  private async querySummonersFromDb(
+    limit = 10,
+    page = 1,
+  ): Promise<DocumentType<Summoner>[]> {
+    console.log(`querySummonersFromDb===>${page}`);
+    page = 80000;
+    const filter = {
+      platformId: 'kr',
+      kda: { $gte: 0, $lt: 3 },
+      'matches.1': { $exists: 1 },
+    };
+    return (await this.SummonerModel.find(filter, {
+      platformId: 1,
+      summonerName: 1,
+      _id: 0,
+    })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .exec()
+      .then((data) => {
+        if (data.length === 0) throw `summonerDb page${page} no data`;
+        return data;
+      })) as DocumentType<Summoner>[];
+  }
+  public activeGameFromSummonerDb() {
+    let page = 1;
+    //从数据库取出数据 ['platformId', 'summonerName']
+    return timer(0, 5000).pipe(
+      exhaustMap(() =>
+        from(this.querySummonersFromDb(10, page)).pipe(
+          //数据库重置翻页
+          // retry({
+          //   count: 1,
+          //   delay: (error, retryCount) => {
+          //     page = 1;
+          //     console.log(error, retryCount);
+          //     return timer(2000);
+          //   },
+          // }),
+          tap(() => {
+            console.log(`summonerDb page ${page}`);
+          }),
+          tap(() => page++),
+          //数据库取出来的platformId 转为大写
+          map((data) =>
+            data.map((obj) => ({
+              platformId: obj.platformId.toUpperCase(),
+              summonerName: obj.summonerName,
+            })),
+          ),
+          mergeMap((summoners) => this.activeTest(summoners)),
+          // tap((data) => {
+          //   console.log(data);
+          // }),
+          delay(2000),
+          catchError((err) => {
+            page = 1;
+            console.log(err);
+            return of('summonerDb no data').pipe(delay(2000));
+            //return caught.pipe(delay(2000));
+          }),
+        ),
+      ),
+    );
+  }
   public activeTest(platformIdAndSummonerNames: PlatformIdAndSummonerName[]) {
     return from(platformIdAndSummonerNames).pipe(
       //SpectatorTv查看是否在游戏中
@@ -153,11 +202,11 @@ export class SpectateClientService {
         ),
       ),
       //游戏中，用拳头API获取数据
-      mergeMap((val: PlatformIdAndGameIdAndSummonerName) =>
+      concatMap((val: PlatformIdAndGameIdAndSummonerName) =>
         this.RiotApiService.activeGameInfoBySummonerName(
           val.platformId,
           val.summonerName,
-        ),
+        ).pipe(delay(1500)),
       ),
       //过滤 指定模式、游戏已进行时长等
       filter(SpectateClientService.isTargetGame),
@@ -278,22 +327,21 @@ export class SpectateClientService {
     );
   }
   //从数据库取出正在进行的游戏
-  private queryDbPendingGames(limit = 10, page = 1) {
-    return from(
-      this.GameModel.find({ 'gameInfo.gamePending': true })
-        .skip((page - 1) * limit)
-        .limit(limit),
-    ).pipe(filter((data) => data !== null));
-  }
-  //从数据库取出正在进行的游戏
-  private async queryDbPendingGames2(limit = 10, page = 1): Promise<Game[]> {
+  private async queryDbPendingGames2(
+    limit = 10,
+    page = 1,
+  ): Promise<DocumentType<Game>[]> {
     return (await this.GameModel.find({ 'gameInfo.gamePending': true })
       .skip((page - 1) * limit)
       .limit(limit)
-      .exec()) as Game[];
+      .exec()
+      .then((games) => {
+        if (games.length === 0) throw `page ${page} no data`;
+        return games;
+      })) as DocumentType<Game>[];
   }
   //game是否滞后
-  static isLagGame(game: Game): boolean {
+  private static isLagGame(game: Game): boolean {
     const {
       fileInfo: [{ nextChunkId, nextFrameId, creatTime }],
     } = game;
@@ -311,7 +359,7 @@ export class SpectateClientService {
   }
   //删除滞后游戏文件及文件夹
   //删除目录及目录下的文件
-  static async rmdir(file: string) {
+  private static async rmdir(file: string) {
     try {
       const stats = await fsp.stat(file);
       //文件，直接删除即可
@@ -341,7 +389,7 @@ export class SpectateClientService {
     //return from(this.GameModel.findByIdAndDelete(id));
   }
   //获取lastChunkInfo
-  private getLastChunkInfo(
+  private getLastChunkInfo$(
     platformId: string,
     gameId: string,
   ): Observable<LastChunkInfo> {
@@ -354,21 +402,23 @@ export class SpectateClientService {
       );
   }
   //过滤出要下载chunk的对局  按照chunk 而不是nextChunk
-  static isNeedDownloadChunk(
+  private static isNeedDownloadChunk(
     localNextChunkId: number,
     httpChunkId: number,
   ): boolean {
+    if (httpChunkId - localNextChunkId > 10) return false;
     return httpChunkId >= localNextChunkId;
   }
   //过滤出要下载frame的对局
-  static isNeedDownloadFrame(
+  private static isNeedDownloadFrame(
     localNextFrameId: number,
     httpFrameId: number,
   ): boolean {
+    if (httpFrameId - localNextFrameId > 10) return false;
     return httpFrameId >= localNextFrameId;
   }
   //http.get下载文件    ？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？出错，记得处理.如果下载出错，是不能更新数据库的哦
-  private httpDownloadData(url: string): Observable<stream> {
+  private httpDownloadData$(url: string): Observable<stream> {
     return this.httpService
       .get(url, {
         timeout: 8000,
@@ -383,14 +433,24 @@ export class SpectateClientService {
       );
   }
   //通过stream保存文件
-  static pipeStream(httpStream: stream, filepath: string): Promise<unknown> {
+  private static pipeStream(
+    httpStream: stream,
+    filepath: string,
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const ws = fs.createWriteStream(filepath);
       httpStream.pipe(ws);
-      httpStream.on('error', reject);
-      httpStream.on('end', resolve);
-      //ws.on('error', () => reject('ws error'))
+      httpStream.on('error', () => reject(`${filepath} failed`));
+      httpStream.on('end', () => resolve(`${filepath} success`));
     });
+  }
+  //http下载文件并保存到本地
+  private httpDownloadAndPipe$(url: string, filepath: string) {
+    return this.httpDownloadData$(url).pipe(
+      mergeMap((httpStream: stream) =>
+        from(SpectateClientService.pipeStream(httpStream, filepath)),
+      ),
+    );
   }
   //更新数据库    游戏结束后，记得按照LastChunkInfo.startGameChunkId 更新数据库中的开始游戏ID
   private async updateGameDb(
@@ -408,16 +468,23 @@ export class SpectateClientService {
       endGameChunkId,
       nextAvailableChunk,
     } = lastChunkInfo;
-    const filter = { $and: [{ _id }, { 'fileInfo._id': fileInfo_id }] };
+    const filter = {
+      $and: [
+        { _id },
+        { 'fileInfo._id': fileInfo_id },
+        // { _id: JSON.stringify(_id) },
+        // { 'fileInfo._id': JSON.stringify(fileInfo_id) },
+      ],
+    };
     //游戏没结束。
-    if (nextChunkId !== chunkId) {
+    if (chunkId !== endGameChunkId) {
       const data = {
         $set: {
           'fileInfo.$.nextChunkId': chunkId === 0 ? 1 : chunkId + 1,
           'fileInfo.$.nextFrameId': keyFrameId === 0 ? 1 : keyFrameId + 1,
         },
       };
-      return this.GameModel.updateOne(filter, data);
+      return await this.GameModel.updateOne(filter, data).exec();
     }
     //游戏结束，此外，"nextAvailableChunk": 0,
     //获取chunk或keyFrame 开始ID
@@ -449,28 +516,85 @@ export class SpectateClientService {
         'gameInfo.endFrameId': keyFrameId,
       },
     };
-    return this.GameModel.updateOne(filter, data);
+    return await this.GameModel.updateOne(filter, data).exec();
   }
 
-  //下载文件  !!数据库取出的数据，记得用 JSON.parse(JSON.stringify(games)) 处理
-  private downloadGame(game: Game) {
-    of(game).pipe(
-      //获取lastChunkInfo
-      concatMap((game: Game) =>
-        this.getLastChunkInfo(
-          game.gameInfo.platformId,
-          String(game.gameInfo.gameId),
-        ),
-      ),
-      filter((lastChunkInfo: LastChunkInfo) => {
-        const {
-          fileInfo: [{ nextChunkId, nextFrameId, creatTime }],
-        } = game;
-        return true;
+  //下载
+  private downloadGame(game: DocumentType<Game>) {
+    const {
+      _id,
+      gameInfo: { platformId, gameId },
+      fileInfo: [{ filepath, nextChunkId, nextFrameId }],
+    } = game;
+    //滞后对局，删除
+    if (SpectateClientService.isLagGame(game)) {
+      console.log('滞后=========>', game);
+      return forkJoin({
+        rmdir: SpectateClientService.rmdir(filepath),
+        deleteDb: this.deleteLagDbGame(_id),
+      });
+    }
+    //下载对局。可能不需要下载对局
+    return this.getLastChunkInfo$(platformId, String(gameId)).pipe(
+      mergeMap((lastChunkInfo: LastChunkInfo) => {
+        const { chunkId, keyFrameId } = lastChunkInfo;
+        return forkJoin({
+          chunk: of(game).pipe(
+            filter((game) =>
+              SpectateClientService.isNeedDownloadChunk(nextChunkId, chunkId),
+            ),
+            mergeMap((game) =>
+              forkJoin(
+                Array.from({ length: chunkId - nextChunkId + 1 }).map(
+                  (_, index) =>
+                    this.httpDownloadAndPipe$(
+                      `http://spectator.${platformId.toLowerCase()}.lol.riotgames.com/observer-mode/rest/consumer/getGameDataChunk/${platformId.toUpperCase()}/${gameId}/${
+                        nextChunkId + index
+                      }/token`,
+                      `${filepath}\\${nextChunkId + index}gameDataChunk`,
+                    ),
+                ),
+              ),
+            ),
+            map(() => `${nextChunkId}-${chunkId} download`),
+            defaultIfEmpty(`needn't download chunk`),
+          ),
+          frame: of(game).pipe(
+            filter(() =>
+              SpectateClientService.isNeedDownloadFrame(
+                nextFrameId,
+                keyFrameId,
+              ),
+            ),
+            mergeMap(() =>
+              forkJoin(
+                Array.from({ length: keyFrameId - nextFrameId + 1 }).map(
+                  (_, index) =>
+                    this.httpDownloadAndPipe$(
+                      `http://spectator.${platformId.toLowerCase()}.lol.riotgames.com/observer-mode/rest/consumer/getKeyFrame/${platformId.toUpperCase()}/${gameId}/${
+                        nextFrameId + index
+                      }/token`,
+                      `${filepath}\\${nextFrameId + index}keyFrame`,
+                    ),
+                ),
+              ),
+            ),
+            tap((data) => {
+              console.log(data);
+            }),
+            map(() => `${nextFrameId}-${keyFrameId} download`),
+            defaultIfEmpty(`needn't download frame`),
+          ),
+        }).pipe(
+          //更新数据库
+          mergeMap(() => from(this.updateGameDb(game, lastChunkInfo))),
+          catchError(() => of(`${gameId} error`)),
+        );
       }),
     );
+    //获取lastChunkInfo
   }
-  static async mkdir(filepath): Promise<boolean> {
+  private static async mkdir(filepath): Promise<boolean> {
     try {
       await filepath.split('\\').reduce(async (totalPath, folder) => {
         const currentPath = (await totalPath) + folder + path.sep;
@@ -500,25 +624,41 @@ export class SpectateClientService {
       catchError((e) => of(`deleteLagGameForDbAndFile error`)),
     );
   }
+
   public downloadGameTest() {
-    //{ 'gameInfo.gameId': '123456' }
-    return from(this.queryDbPendingGames2(1)).pipe(
-      map((games: Game[]) => from(games)),
-      mergeAll(),
-      //删除过时对局和
-      mergeMap((game: Game) =>
-        forkJoin({
-          deleteLagGame: this.deleteLagGameForDbAndFile(game),
-        }),
+    let page = 1;
+    return timer(0, 10000).pipe(
+      tap((i) => {
+        console.log(`gameDb ${i}`);
+      }),
+      exhaustMap(() =>
+        from(this.queryDbPendingGames2(10, page)).pipe(
+          //一般为当前page无数据
+          // retry({
+          //   count: 1,
+          //   delay: () => {
+          //     page = 1;
+          //     return timer(1000);
+          //   },
+          // }),
+          tap(() => page++),
+          mergeMap((games: DocumentType<Game>[]) => from(games)),
+          //删除过时对局和下载数据
+          concatMap((game: DocumentType<Game>) => this.downloadGame(game)),
+          // toArray(),
+          // tap((data) => {
+          //   console.log(data);
+          // }),
+          catchError((err, caught) => {
+            page = 1;
+            return of('gameDb no data').pipe(delay(2000));
+            //return caught.pipe(delay(2000));
+          }),
+        ),
       ),
-      // filter((game: Game) => !SpectateClientService.isLagGame(game)),
-      // tap((i) => {
-      //   console.log(i);
-      // }),
-      // map((game: Game) => new Date().getTime()),
-      // isEmpty(),
-      //map((games: Game[]) => games.map((game, index) => index)),
     );
+
+    return;
   }
 
   //从数据库取出正在对局的游戏，然后下载
@@ -583,24 +723,4 @@ export class SpectateClientService {
   //     ),
   //   );
   // }
-
-  create(createSpectateClientDto: CreateSpectateClientDto) {
-    return 'This action adds a new spectateClient';
-  }
-
-  findAll() {
-    return `This action returns all spectateClient`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} spectateClient`;
-  }
-
-  update(id: number, updateSpectateClientDto: UpdateSpectateClientDto) {
-    return `This action updates a #${id} spectateClient`;
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} spectateClient`;
-  }
 }
