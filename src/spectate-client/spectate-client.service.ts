@@ -43,7 +43,7 @@ export class SpectateClientService {
     private readonly SummonerModel: ReturnModelType<typeof Summoner>,
     private readonly SpectatorTvService: SpectatorTvService,
     private readonly RiotApiService: RiotApiService,
-    private readonly httpService: HttpService,
+    private readonly httpService: HttpService, //测试active暂停用
   ) {}
 
   //数据库查找是否已经含有此局game
@@ -112,7 +112,7 @@ export class SpectateClientService {
     page = 1,
   ): Promise<DocumentType<Summoner>[]> {
     console.log(`querySummonersFromDb===>${page}`);
-    page = 80000;
+    //this.activePause = false;
     const filter = {
       platformId: 'kr',
       kda: { $gte: 0, $lt: 3 },

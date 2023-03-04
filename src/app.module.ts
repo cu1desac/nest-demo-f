@@ -8,6 +8,8 @@ import { SpectateClientModule } from './spectate-client/spectate-client.module';
 import { RiotApiModule } from '../utils/riot-api/riot-api.module';
 import { HttpModule } from '@nestjs/axios';
 import { ObserverModule } from './observer/observer.module';
+import { SpectateModule } from './spectate/spectate.module';
+import { MatchModule } from './match/match.module';
 
 @Module({
   imports: [
@@ -16,6 +18,8 @@ import { ObserverModule } from './observer/observer.module';
     RiotApiModule,
     HttpModule,
     ObserverModule,
+    SpectateModule,
+    MatchModule,
   ],
   controllers: [AppController],
   providers: [AppService],
